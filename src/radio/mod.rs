@@ -32,12 +32,11 @@ impl Pluto {
         if rate < Frequency::new::<kilohertz>(521) {
             Err(Error::InvalidSampleRate)
         } else {
-			// dec: decimation factor
-			// taps: number of FIR coefficients
-			// fir: list of FIR coefficients
-            let fir_config = if rate <= Frequency::new::<hertz>(20000000)
-            {
-				&fir::FIR_128_4
+            // dec: decimation factor
+            // taps: number of FIR coefficients
+            // fir: list of FIR coefficients
+            let fir_config = if rate <= Frequency::new::<hertz>(20000000) {
+                &fir::FIR_128_4
             } else if rate <= Frequency::new::<hertz>(40000000) {
                 &fir::FIR_128_2
             } else if rate <= Frequency::new::<hertz>(53333333) {
@@ -46,7 +45,7 @@ impl Pluto {
                 &fir::FIR_64_2
             };
 
-			let dec = fir_config.decimation_factor;
+            let dec = fir_config.decimation_factor;
             let fir = fir_config.fir_coefficients;
 
             let current_sample_rate = self.get_sample_rate()?;
@@ -75,14 +74,11 @@ impl Pluto {
 
             if rate <= Frequency::new::<hertz>(25000000 / 12) {
                 let tx_path_rates = self.phy_device.attr_read_str("tx_path_rates")?;
-                let (
-                    _,
-                    TxPathRates {
-                        dac_sample_rate,
-                        tx_sample_rate,
-                        ..
-                    },
-                ) = parse_tx_path_rates(&tx_path_rates).map_err(|_| Error::ParsingError)?;
+                let TxPathRates {
+                    dac_sample_rate,
+                    tx_sample_rate,
+                    ..
+                } = parse_tx_path_rates(&tx_path_rates)?;
                 let max = (dac_sample_rate.get::<hertz>() / tx_sample_rate.get::<hertz>()) * 16;
                 if max < fir.len() as u64 {
                     voltage0.attr_write_int("sampling_frequency", 3000000)?;
@@ -158,41 +154,46 @@ fn decimal64(input: &str) -> IResult<&str, u64> {
     .parse(input)
 }
 
-fn parse_tx_path_rates(input: &str) -> IResult<&str, TxPathRates> {
-    let (input, _) = tag("BBPLL:")(input)?;
-    let (input, baseband_pll_freq) = decimal64(input)?;
-    let (input, _) = tag(" ")(input)?;
+fn parse_tx_path_rates(input: &str) -> Result<TxPathRates> {
+    let (_, tx_path_rates) = nom::combinator::all_consuming(move |input| {
+        let (input, _) = tag("BBPLL:")(input)?;
+        let (input, baseband_pll_freq) = decimal64(input)?;
+        let (input, _) = tag(" ")(input)?;
 
-    let (input, _) = tag("DAC:")(input)?;
-    let (input, dac_sample_rate) = decimal64(input)?;
-    let (input, _) = tag(" ")(input)?;
+        let (input, _) = tag("DAC:")(input)?;
+        let (input, dac_sample_rate) = decimal64(input)?;
+        let (input, _) = tag(" ")(input)?;
 
-    let (input, _) = tag("T2:")(input)?;
-    let (input, hb3_filter_rate) = decimal64(input)?;
-    let (input, _) = tag(" ")(input)?;
+        let (input, _) = tag("T2:")(input)?;
+        let (input, hb3_filter_rate) = decimal64(input)?;
+        let (input, _) = tag(" ")(input)?;
 
-    let (input, _) = tag("T1:")(input)?;
-    let (input, hb2_filter_rate) = decimal64(input)?;
-    let (input, _) = tag(" ")(input)?;
+        let (input, _) = tag("T1:")(input)?;
+        let (input, hb2_filter_rate) = decimal64(input)?;
+        let (input, _) = tag(" ")(input)?;
 
-    let (input, _) = tag("TF:")(input)?;
-    let (input, hb1_filter_rate) = decimal64(input)?;
-    let (input, _) = tag(" ")(input)?;
+        let (input, _) = tag("TF:")(input)?;
+        let (input, hb1_filter_rate) = decimal64(input)?;
+        let (input, _) = tag(" ")(input)?;
 
-    let (input, _) = tag("TXSAMP:")(input)?;
-    let (input, tx_sample_rate) = decimal64(input)?;
+        let (input, _) = tag("TXSAMP:")(input)?;
+        let (input, tx_sample_rate) = decimal64(input)?;
 
-    Ok((
-        input,
-        TxPathRates {
-            tx_sample_rate: Frequency::new::<hertz>(tx_sample_rate),
-            hb1_filter_rate: Frequency::new::<hertz>(hb1_filter_rate),
-            hb2_filter_rate: Frequency::new::<hertz>(hb2_filter_rate),
-            hb3_filter_rate: Frequency::new::<hertz>(hb3_filter_rate),
-            dac_sample_rate: Frequency::new::<hertz>(dac_sample_rate),
-            baseband_pll_freq: Frequency::new::<hertz>(baseband_pll_freq),
-        },
-    ))
+        Ok((
+            input,
+            TxPathRates {
+                tx_sample_rate: Frequency::new::<hertz>(tx_sample_rate),
+                hb1_filter_rate: Frequency::new::<hertz>(hb1_filter_rate),
+                hb2_filter_rate: Frequency::new::<hertz>(hb2_filter_rate),
+                hb3_filter_rate: Frequency::new::<hertz>(hb3_filter_rate),
+                dac_sample_rate: Frequency::new::<hertz>(dac_sample_rate),
+                baseband_pll_freq: Frequency::new::<hertz>(baseband_pll_freq),
+            },
+        ))
+    })(input)
+    .map_err(|_| Error::ParsingError)?;
+
+    Ok(tx_path_rates)
 }
 
 #[cfg(test)]
@@ -205,11 +206,10 @@ mod tests {
 
     #[test]
     fn parsing_tx_path_rates_works() {
-        let (input, path_rates) = parse_tx_path_rates(
+        let path_rates = parse_tx_path_rates(
             "BBPLL:1024000006 DAC:128000000 T2:64000000 T1:32000000 TF:16000000 TXSAMP:4000000",
         )
         .unwrap();
-        assert_eq!(input.len(), 0);
         assert_eq!(
             path_rates,
             TxPathRates {
