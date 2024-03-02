@@ -7,14 +7,17 @@ pub enum Error {
     #[error("IIO error: {0}")]
     IIOError(#[from] industrial_io::Error),
 
-	#[error("Rust formatting error: {0}")]
-	FmtError(#[from] std::fmt::Error),
+    #[error("Rust formatting error: {0}")]
+    FmtError(#[from] std::fmt::Error),
 
-	#[error("unable to parse attribute data")]
-	ParsingError,
+    #[error("unable to parse attribute data")]
+    ParsingError,
 
-	#[error("invalid sample rate")]
-	InvalidSampleRate,
+    #[error("invalid gain control mode: {0}")]
+    InvalidGainControlMode(String),
+
+    #[error("invalid sample rate")]
+    InvalidSampleRate,
 
     #[error("unable to find device: {0}")]
     CantFindDevice(&'static str),

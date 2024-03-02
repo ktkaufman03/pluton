@@ -1,4 +1,7 @@
-use std::fmt::Write;
+use std::{
+    fmt::{Display, Write},
+    str::FromStr,
+};
 
 use industrial_io as iio;
 use uom::si::{
@@ -8,6 +11,35 @@ use uom::si::{
 
 mod fir;
 use crate::{error::Error, Result};
+
+pub enum GainControlMode {
+    SlowAttack,
+    FastAttack,
+    Manual,
+}
+
+impl FromStr for GainControlMode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "slow_attack" => Ok(Self::SlowAttack),
+            "fast_attack" => Ok(Self::FastAttack),
+            "manual" => Ok(Self::Manual),
+            x => Err(Error::InvalidGainControlMode(x.to_string())),
+        }
+    }
+}
+
+impl Display for GainControlMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::SlowAttack => f.write_str("slow_attack"),
+            Self::FastAttack => f.write_str("fast_attack"),
+            Self::Manual => f.write_str("manual"),
+        }
+    }
+}
 
 /// Wrapper for interfacing with the ADALM-PLUTO from Analog Devices.
 pub struct Pluto {
@@ -21,11 +53,7 @@ impl Pluto {
     }
 
     pub fn get_sample_rate(&self) -> Result<Frequency> {
-        let voltage0 = Self::find_channel(&self.phy_device, "voltage0", false)?;
-        let sample_rate = voltage0.attr_read_int("sampling_frequency")?;
-        let sample_rate = u64::try_from(sample_rate)?;
-
-        Ok(Frequency::new::<hertz>(sample_rate))
+        self.read_chan_freq_attr("voltage0", false, "sampling_frequency")
     }
 
     pub fn set_sample_rate(&mut self, rate: Frequency) -> Result<()> {
@@ -35,7 +63,10 @@ impl Pluto {
             // dec: decimation factor
             // taps: number of FIR coefficients
             // fir: list of FIR coefficients
-            let fir_config = if rate <= Frequency::new::<hertz>(20000000) {
+            let &FirConfig {
+                decimation_factor,
+                fir_coefficients,
+            } = if rate <= Frequency::new::<hertz>(20000000) {
                 &fir::FIR_128_4
             } else if rate <= Frequency::new::<hertz>(40000000) {
                 &fir::FIR_128_2
@@ -44,9 +75,6 @@ impl Pluto {
             } else {
                 &fir::FIR_64_2
             };
-
-            let dec = fir_config.decimation_factor;
-            let fir = fir_config.fir_coefficients;
 
             let current_sample_rate = self.get_sample_rate()?;
             let voltage0 = Self::find_channel(&self.phy_device, "voltage0", true)?;
@@ -61,10 +89,10 @@ impl Pluto {
             }
 
             let mut fir_config = String::new();
-            writeln!(&mut fir_config, "RX 3 GAIN -6 DEC {dec}")?;
-            writeln!(&mut fir_config, "TX 3 GAIN 0 INT {dec}")?;
+            writeln!(&mut fir_config, "RX 3 GAIN -6 DEC {decimation_factor}")?;
+            writeln!(&mut fir_config, "TX 3 GAIN 0 INT {decimation_factor}")?;
 
-            for tap in fir {
+            for tap in fir_coefficients {
                 writeln!(&mut fir_config, "{0}/{0}", tap)?;
             }
             writeln!(&mut fir_config)?;
@@ -80,7 +108,7 @@ impl Pluto {
                     ..
                 } = parse_tx_path_rates(&tx_path_rates)?;
                 let max = (dac_sample_rate.get::<hertz>() / tx_sample_rate.get::<hertz>()) * 16;
-                if max < fir.len() as u64 {
+                if max < fir_coefficients.len() as u64 {
                     voltage0.attr_write_int("sampling_frequency", 3000000)?;
                 }
 
@@ -93,6 +121,85 @@ impl Pluto {
 
             Ok(())
         }
+    }
+
+    pub fn get_rx_carrier_freq(&self) -> Result<Frequency> {
+        self.read_chan_freq_attr("altvoltage0", true, "frequency")
+    }
+
+    pub fn set_rx_carrier_freq(&mut self, freq: Frequency) -> Result<()> {
+        let altvoltage0 = Self::find_channel(&self.phy_device, "altvoltage0", true)?;
+        altvoltage0.attr_write_int("frequency", freq.value as i64)?;
+        Ok(())
+    }
+
+    pub fn get_tx_carrier_freq(&self) -> Result<Frequency> {
+        self.read_chan_freq_attr("altvoltage1", true, "frequency")
+    }
+
+    pub fn set_tx_carrier_freq(&mut self, freq: Frequency) -> Result<()> {
+        let altvoltage1 = Self::find_channel(&self.phy_device, "altvoltage1", true)?;
+        altvoltage1.attr_write_int("frequency", freq.value as i64)?;
+        Ok(())
+    }
+
+    pub fn get_gain_control_mode(&self) -> Result<GainControlMode> {
+        Self::find_channel(&self.phy_device, "voltage0", false)
+            .and_then(|c| c.attr_read_str("gain_control_mode").map_err(Error::from))
+            .and_then(|s| GainControlMode::from_str(s.as_str()))
+    }
+
+    pub fn set_gain_control_mode(&mut self, mode: GainControlMode) -> Result<()> {
+        Self::find_channel(&self.phy_device, "voltage0", false).and_then(|c| {
+            c.attr_write_str("gain_control_mode", mode.to_string().as_str())
+                .map_err(Error::from)
+        })
+    }
+
+    pub fn get_rx_hardware_gain(&self) -> Result<f64> {
+        Self::find_channel(&self.phy_device, "voltage0", false)
+            .and_then(|c| c.attr_read_float("hardwaregain").map_err(Error::from))
+    }
+
+    pub fn set_rx_hardware_gain(&mut self, gain: f64) -> Result<()> {
+        Self::find_channel(&self.phy_device, "voltage0", false).and_then(|c| {
+            c.attr_write_float("hardwaregain", gain)
+                .map_err(Error::from)
+        })
+    }
+
+    pub fn get_tx_hardware_gain(&self) -> Result<f64> {
+        Self::find_channel(&self.phy_device, "voltage0", true)
+            .and_then(|c| c.attr_read_float("hardwaregain").map_err(Error::from))
+    }
+
+    pub fn set_tx_hardware_gain(&mut self, gain: f64) -> Result<()> {
+        Self::find_channel(&self.phy_device, "voltage0", true).and_then(|c| {
+            c.attr_write_float("hardwaregain", gain)
+                .map_err(Error::from)
+        })
+    }
+
+    pub fn get_rx_rf_bandwidth(&self) -> Result<Frequency> {
+        self.read_chan_freq_attr("voltage0", false, "rf_bandwidth")
+    }
+
+    pub fn set_rx_rf_bandwidth(&mut self, bandwidth: Frequency) -> Result<()> {
+        Self::find_channel(&self.phy_device, "voltage0", false).and_then(|c| {
+            c.attr_write_int("rf_bandwidth", bandwidth.value as i64)
+                .map_err(Error::from)
+        })
+    }
+
+    pub fn get_tx_rf_bandwidth(&self) -> Result<Frequency> {
+        self.read_chan_freq_attr("voltage0", true, "rf_bandwidth")
+    }
+
+    pub fn set_tx_rf_bandwidth(&mut self, bandwidth: Frequency) -> Result<()> {
+        Self::find_channel(&self.phy_device, "voltage0", true).and_then(|c| {
+            c.attr_write_int("rf_bandwidth", bandwidth.value as i64)
+                .map_err(Error::from)
+        })
     }
 
     fn is_tx_fir_enabled(&self) -> Result<bool> {
@@ -126,6 +233,20 @@ impl Pluto {
     fn find_device<'a>(context: &'a iio::Context, name: &'static str) -> Result<iio::Device> {
         context.find_device(name).ok_or(Error::CantFindDevice(name))
     }
+
+    fn read_chan_freq_attr(
+        &self,
+        channel: &'static str,
+        is_output: bool,
+        attr: &'static str,
+    ) -> Result<Frequency> {
+        let altvoltage0 = Self::find_channel(&self.phy_device, channel, is_output)?;
+
+        let frequency = altvoltage0.attr_read_int(attr)?;
+        let sample_rate = u64::try_from(frequency)?;
+
+        Ok(Frequency::new::<hertz>(sample_rate))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -146,6 +267,8 @@ use nom::{
     sequence::terminated,
     IResult, Parser,
 };
+
+use self::fir::FirConfig;
 
 fn decimal64(input: &str) -> IResult<&str, u64> {
     map_res(recognize(many1(one_of("0123456789"))), |x: &str| {
