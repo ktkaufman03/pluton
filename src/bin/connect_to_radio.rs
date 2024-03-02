@@ -3,7 +3,7 @@ use pluton::{self, };
 use uom::si::u64::Frequency;
 
 fn main() {
-    let ctx = industrial_io::Context::from_uri("usb:1.8.5").unwrap();
+    let ctx = industrial_io::Context::from_uri("ip:pluto.local").unwrap();
     let mut radio = pluton::radio::Pluto::from_context(ctx).unwrap();
     let sample_rate = radio.get_sample_rate().unwrap();
     println!(
